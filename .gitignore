@@ -1,0 +1,21 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment Variables (Protect API keys!)
+.env
+*.env
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+
+# IDE files
+.vscode/
+.idea/
+
+# Database (optional - keep json files for rebuilding)
+*.db
