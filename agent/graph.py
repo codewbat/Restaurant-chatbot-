@@ -24,7 +24,7 @@ api_key = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
 str_parser = StrOutputParser()
 
 llm = ChatGroq(
-    model="qwen/qwen3.6-27b",
+    model="openai/gpt-oss-20b",
     api_key=api_key,
     temperature=0.2,
     max_tokens=1536,
@@ -353,6 +353,7 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
         }
 
     # If pure database results (no RAG docs), format directly to save 2,500 LLM tokens!
+    llm_resp = None
     if results is not None and not doc_context:
         sanitized_rows = ResponseFormatter.sanitize_for_presentation(query, results[:15])
         if len(sanitized_rows) == 1 and len(sanitized_rows[0]) <= 2:
@@ -420,7 +421,7 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
     }
 
     cur_tokens = state.get("token_usage") or {"prompt": 0, "completion": 0, "total": 0}
-    syn_tok = getattr(llm_resp, "response_metadata", {}).get("token_usage", {}) or {}
+    syn_tok = getattr(llm_resp, "response_metadata", {}).get("token_usage", {}) if llm_resp is not None else {}
     final_tokens = {
         "prompt": cur_tokens.get("prompt", 0) + syn_tok.get("prompt_tokens", 0),
         "completion": cur_tokens.get("completion", 0) + syn_tok.get("completion_tokens", 0),
