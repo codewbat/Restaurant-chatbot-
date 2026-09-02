@@ -352,28 +352,44 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
             "messages": state.get("messages", []) + [HumanMessage(content=state["user_input"]), AIMessage(content=reply)]
         }
 
-    # Prepare grounding prompt for LLM (Response Presentation Layer)
-    context_data = ""
-    if results is not None:
+    # If pure database results (no RAG docs), format directly to save 2,500 LLM tokens!
+    if results is not None and not doc_context:
         sanitized_rows = ResponseFormatter.sanitize_for_presentation(query, results[:15])
-        context_data += f"\nDatabase Query Results ({len(results)} rows):\n{json.dumps(sanitized_rows, indent=1)}\n"
-    if doc_context:
-        context_data += f"\nRestaurant Policy & Operational Documents:\n{json.dumps(doc_context, indent=1)}\n"
+        if len(sanitized_rows) == 1 and len(sanitized_rows[0]) <= 2:
+            items = [f"**{k}:** {v}" for k, v in sanitized_rows[0].items()]
+            final_text = "\n".join(items)
+        else:
+            final_text = ResponseFormatter.format_markdown_table(sanitized_rows)
+        # 0 tokens spent on synthesizer!
+    else:
+        # Prepare grounding prompt for LLM (only for RAG / Policy queries)
+        context_data = ""
+        if results is not None:
+            sanitized_rows = ResponseFormatter.sanitize_for_presentation(query, results[:15])
+            context_data += f"\nDatabase Query Results ({len(results)} rows):\n{json.dumps(sanitized_rows, indent=1)}\n"
+        if doc_context:
+            context_data += f"\nRestaurant Policy & Operational Documents:\n{json.dumps(doc_context, indent=1)}\n"
 
-    messages = SYNTHESIZER_PROMPT.format_messages(
-        query=query,
-        context_data=context_data if context_data else "No specific context available."
-    )
+        messages = SYNTHESIZER_PROMPT.format_messages(
+            query=query,
+            context_data=context_data if context_data else "No specific context available."
+        )
 
-    llm_resp = llm.invoke(messages)
-    clean_content = re.sub(r"<think>.*?(?:</think>|$)", "", llm_resp.content, flags=re.DOTALL).strip()
-    clean_content = re.sub(r"(?i)here's a thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
-    clean_content = re.sub(r"(?i)thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
-    final_text = str_parser.parse(clean_content).strip()
+        llm_resp = llm.invoke(messages)
+        clean_content = re.sub(r"<think>.*?(?:</think>|$)", "", llm_resp.content, flags=re.DOTALL).strip()
+        clean_content = re.sub(r"(?i)here's a thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
+        clean_content = re.sub(r"(?i)thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
+        final_text = str_parser.parse(clean_content).strip()
 
-    # Fallback to direct clean table if synthesizer was empty or hijacked by thinking
-    if not final_text and results:
-        final_text = ResponseFormatter.format_markdown_table(sanitized_rows)
+        if llm_resp and hasattr(llm_resp, "response_metadata"):
+            tu = llm_resp.response_metadata.get("token_usage", {})
+            current_tokens["prompt"] += tu.get("prompt_tokens", 0)
+            current_tokens["completion"] += tu.get("completion_tokens", 0)
+            current_tokens["total"] += tu.get("total_tokens", 0)
+
+        # Fallback to direct clean table if synthesizer was empty or hijacked by thinking
+        if not final_text and results:
+            final_text = ResponseFormatter.format_markdown_table(sanitized_rows)
 
     # Append pagination navigation hint if more records exist
     current_page = state.get("page", 1)

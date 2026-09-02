@@ -48,37 +48,33 @@ class SQLAgent:
 
     @staticmethod
     def prune_schema(query: str) -> List[str]:
-        """LLM-driven dynamic table selector based on user query and schema understanding."""
-        messages = SCHEMA_PRUNER_PROMPT.format_messages(query=query)
-        try:
-            response = llm.invoke(messages)
-            parsed = table_parser.parse(response.content)
-            raw_tables = parsed.get("selected_tables", [])
-            
-            # Validate that returned tables actually exist in database
-            valid_tables = [t for t in raw_tables if t in ALL_DB_TABLES]
-            if valid_tables:
-                return valid_tables
-        except Exception:
-            pass
-
-        # Robust Fallback if LLM selector fails or returns empty
+        """High-speed deterministic table selector based on user query keywords (0 LLM tokens)."""
         q = query.lower()
-        fallback = set()
-        if any(w in q for w in ["employee", "staff", "waiter", "chef", "manager", "captain", "worker", "roster", "attendance", "present", "absent", "leave", "half day", "shift", "salary"]):
-            fallback.update(["employees", "attendance"])
-        elif any(w in q for w in ["menu", "dish", "food", "coffee", "tea", "roti", "price", "rate", "cost", "veg", "jain", "spicy"]):
-            fallback.update(["menu_items", "categories"])
-        elif any(w in q for w in ["stock", "available", "inventory"]):
-            fallback.update(["inventory"])
-        elif any(w in q for w in ["order", "bill", "cooking", "pending", "served", "sale", "revenue"]):
-            fallback.update(["orders", "order_items", "menu_items"])
-        elif any(w in q for w in ["rating", "review", "feedback", "comment"]):
-            fallback.update(["feedback", "customers"])
-        else:
-            fallback.update(["menu_items", "categories", "orders"])
+        selected = set()
 
-        return sorted(list(fallback))
+        # 1. Staff & Attendance
+        if any(w in q for w in ["attendance", "hours", "present", "absent", "leave", "half day", "check in", "check out"]):
+            selected.update(["employees", "attendance"])
+        elif any(w in q for w in ["employee", "staff", "waiter", "chef", "manager", "captain", "worker", "roster", "shift", "salary", "phone", "hire"]):
+            selected.update(["employees"])
+
+        # 2. Stock & Inventory
+        elif any(w in q for w in ["stock", "inventory", "available", "bottles", "scoops"]):
+            selected.update(["inventory"])
+
+        # 3. Active Orders & Kitchen status
+        elif any(w in q for w in ["order", "bill", "cooking", "pending", "served", "table 1", "table 2", "table 3", "table 4", "table 5"]):
+            selected.update(["orders", "order_items", "menu_items", "dining_tables"])
+
+        # 4. Customer Feedback
+        elif any(w in q for w in ["rating", "review", "feedback", "comment"]):
+            selected.update(["feedback", "customers"])
+
+        # 5. Menu Items & Categories (Default for dishes, prices, drinks, etc.)
+        else:
+            selected.update(["menu_items", "categories"])
+
+        return sorted(list(selected))
 
     @staticmethod
     def generate_sql(

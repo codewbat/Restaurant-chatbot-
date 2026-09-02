@@ -131,26 +131,14 @@ Convert natural language business queries into a clean JSON structure containing
 User: "waiter ke naam baato"
 JSON: {{"sql": "SELECT name, role, phone, shift FROM employees WHERE LOWER(role) LIKE '%waiter%';", "tables_used": ["employees"], "reasoning": "Fetching employees with waiter role using case-insensitive match"}}
 
-User: "Rahul ka August attendance batao"
-JSON: {{"sql": "SELECT e.name, a.date, a.status, a.check_in, a.check_out FROM attendance a JOIN employees e ON a.employee_id = e.id WHERE e.name LIKE '%Rahul%' AND a.date LIKE '2026-08%' ORDER BY a.date LIMIT 50;", "tables_used": ["employees", "attendance"], "reasoning": "Joining employees and attendance to fetch August records for Rahul"}}
-
 User: "ye baato ki apke pass chocolate ice cream available hai stock me and kitne hai"
 JSON: {{"sql": "SELECT name, stock, available, price, unit FROM inventory WHERE (name LIKE '%chocolate%' AND name LIKE '%ice%') LIMIT 10;", "tables_used": ["inventory"], "reasoning": "Checking stock levels for chocolate ice cream in inventory with multi-word matching"}}
-
-User: "Show coffee items where price <= 200"
-JSON: {{"sql": "SELECT m.name, m.price, c.name as category FROM menu_items m JOIN categories c ON m.category_id = c.id WHERE m.name LIKE '%Coffee%' AND m.price <= 200 ORDER BY m.price ASC LIMIT 50;", "tables_used": ["menu_items", "categories"], "reasoning": "Filtering menu items with Coffee in name and price <= 200"}}
-
-User: "Aaj kitne active orders hain?"
-JSON: {{"sql": "SELECT COUNT(*) as active_orders_count FROM orders WHERE status IN ('pending', 'cooking', 'served');", "tables_used": ["orders"], "reasoning": "Counting non-completed active orders"}}
 
 User: "Table 1 par kya order chal raha hai aur bill kitna hua?"
 JSON: {{"sql": "SELECT o.order_number, m.name as dish, oi.quantity, oi.total_price, o.status, o.net_amount as total_bill FROM orders o JOIN order_items oi ON o.id = oi.order_id JOIN menu_items m ON oi.menu_item_id = m.id WHERE o.table_id = 1 AND o.status IN ('pending', 'cooking', 'served') LIMIT 50;", "tables_used": ["orders", "order_items", "menu_items"], "reasoning": "Fetching live order items and net bill for Table 1"}}
 
-User: "Average food rating kya hai?"
-JSON: {{"sql": "SELECT AVG(food_rating) as avg_food_rating, AVG(service_rating) as avg_service_rating FROM feedback;", "tables_used": ["feedback"], "reasoning": "Calculating average food and service rating from feedback"}}
-
 User: "Vikash Mehra ne whole month me kitne hours kaam kiya"
-JSON: {{"sql": "SELECT e.name, ROUND(SUM((strftime('%H', a.check_out) - strftime('%H', a.check_in)) + (strftime('%M', a.check_out) - strftime('%M', a.check_in))/60.0), 1) as total_hours_worked FROM attendance a JOIN employees e ON a.employee_id = e.id WHERE e.name LIKE '%Vikash Mehra%' AND a.check_in IS NOT NULL AND a.check_out IS NOT NULL;", "tables_used": ["employees", "attendance"], "reasoning": "Calculating total hours worked by summing duration of check_in and check_out"}}
+JSON: {{"sql": "SELECT e.name, ROUND(SUM((strftime('%H', a.check_out) - strftime('%H', a.check_in)) + (strftime('%M', a.check_out) - strftime('%M', a.check_in))/60.0), 1) as total_hours_worked FROM attendance a JOIN employees e ON a.employee_id = e.id WHERE e.name LIKE '%Vikash Mehra%' AND a.date LIKE '2026-08%' AND a.check_in IS NOT NULL AND a.check_out IS NOT NULL;", "tables_used": ["employees", "attendance"], "reasoning": "Calculating total hours worked by summing duration of check_in and check_out"}}
 </few_shot_examples>
 {error_context}"""),
     ("human", "<task>Generate JSON SQL query for: '{query}'</task>")

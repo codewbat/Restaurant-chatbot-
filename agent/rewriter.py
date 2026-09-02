@@ -104,7 +104,45 @@ def analyze_and_rewrite(
             "updated_slots": {**active_slots, "pagination_direction": "next"}
         }
 
-    # 2. Sliding window of last 6 messages (with compressed Assistant history)
+    # 3. Fast-path for Standalone Queries (Saves ~2,000 tokens by skipping Rewriter LLM)
+    context_pronouns = ["inme", "inmein", "iska", "iske", "iski", "unka", "unke", "usme", "usmein", "ye wale", "wo wale", "aur dikhao", "or dikhao", "isme"]
+    has_pronoun = any(p in clean_input for p in context_pronouns)
+
+    # Direct policy queries -> RAG
+    if any(k in clean_input for k in ["smoking", "buffet timing", "dinner timing", "lunch timing", "break timing"]):
+        return {
+            "is_greeting": False,
+            "needs_clarification": False,
+            "clarification_question": None,
+            "rewritten_query": user_input,
+            "intent": "rag",
+            "confidence": 1.0,
+            "updated_slots": active_slots,
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+
+    # Direct CRM queries -> SQL (0 LLM Tokens used!)
+    crm_keywords = [
+        "menu", "dish", "dishes", "food", "coffee", "tea", "drink", "drinks", "price", "rate", "cost",
+        "veg", "non-veg", "non veg", "jain", "spicy", "teekha", "pizza", "burger", "ice cream", "dessert", "lassi",
+        "bread", "roti", "naan", "paratha", "starter", "starters", "soup", "chilly", "paneer",
+        "waiter", "waiters", "chef", "head chef", "salary", "attendance", "hours", "kaam kiya", "shift",
+        "employee", "employees", "staff", "table", "active order", "active orders",
+        "bill", "kitchen", "cooking", "served", "pending", "stock", "inventory", "available"
+    ]
+    if not has_pronoun and any(k in clean_input for k in crm_keywords):
+        return {
+            "is_greeting": False,
+            "needs_clarification": False,
+            "clarification_question": None,
+            "rewritten_query": user_input,
+            "intent": "sql",
+            "confidence": 1.0,
+            "updated_slots": active_slots,
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+
+    # 4. Sliding window of last 6 messages (with compressed Assistant history)
     window_messages = chat_history[-6:] if len(chat_history) > 6 else chat_history
     formatted_history = []
     for msg in window_messages:
