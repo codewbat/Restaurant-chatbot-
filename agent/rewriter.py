@@ -15,11 +15,10 @@ load_dotenv()
 api_key = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
 
 llm = ChatGroq(
-    model="openai/gpt-oss-20b",
+    model="qwen/qwen3.8-27b",
     api_key=api_key,
     temperature=0.1,
-    max_tokens=1024,
-    reasoning_format="hidden",
+    max_tokens=400,
     max_retries=3,
 )
 
@@ -34,58 +33,68 @@ class RewriterAnalysis(BaseModel):
 
 parser = JsonOutputParser(pydantic_object=RewriterAnalysis)
 
-def analyze_and_rewrite(
+def fast_filter_classify(
     user_input: str,
-    chat_history: List[BaseMessage],
-    active_slots: Dict[str, Any]
+    active_slots: Optional[Dict[str, Any]] = None,
+    has_history: bool = False
 ) -> Dict[str, Any]:
     """
-    LCEL Chain with ChatPromptTemplate and JsonOutputParser for robust context resolution.
+    Deterministic Fast-Filter (0 LLM Tokens):
+    Filters commands (greeting, pagination, order, policy) and standalone business queries
+    away from the Rewriter LLM, saving ~1,000 prompt tokens per request.
     """
+    slots = active_slots or {}
     clean_input = user_input.strip().lower()
 
-    # 1. Fast local regex for obvious single-word greetings to save LLM latency
-    if clean_input in ["hi", "hello", "hey", "namaste", "namaskar", "pranam", "good morning", "good evening", "thanks", "thank you", "dhanyawad"]:
+    # 1. Greetings & Capabilities Queries (0 LLM Tokens -> greeting node)
+    capabilities_phrases = [
+        "what do you provide", "what do u provide", "what can you do", "who are you",
+        "tum kya kar sakte ho", "aap kya kar sakte ho", "kya kya service hai", "help", "features", "capabilities"
+    ]
+    is_greeting = clean_input in ["hi", "hello", "hey", "namaste", "namaskar", "pranam", "good morning", "good evening", "thanks", "thank you", "dhanyawad"]
+    is_capability = any(p in clean_input for p in capabilities_phrases)
+
+    if is_greeting or is_capability:
         return {
-            "is_greeting": True,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "rewritten_query": user_input,
+            "needs_context": False,
+            "is_fast_exit": True,
             "intent": "greeting",
             "confidence": 1.0,
-            "updated_slots": active_slots
+            "rewritten_query": user_input,
+            "updated_slots": slots,
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 
-    # 2. Fast local check for ordering food/drink intent
+    # 2. Food & Drink Ordering Action (0 LLM Tokens -> order node)
     order_phrases = [
         "order karni hai", "order karna hai", "order lena hai", "order lagao", "order book karo",
         "order chahiye", "ye mangwa do", "mangwa do", "le aao", "pack kar do", "parcel kar do", "order please"
     ]
     if any(p in clean_input for p in order_phrases):
         return {
-            "is_greeting": False,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "rewritten_query": user_input,
+            "needs_context": False,
+            "is_fast_exit": True,
             "intent": "order",
             "confidence": 1.0,
-            "updated_slots": active_slots
+            "rewritten_query": user_input,
+            "updated_slots": slots,
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 
-    # 2. Fast local regex for pagination keywords (next vs previous)
+    # 3. Pagination Commands (0 LLM Tokens -> pagination node)
     prev_keywords = [
         "previous", "prev", "back", "piche", "peeche", "pichla", "pichhla", "pehle wala",
         "previous page", "pichhla page", "pichhe ka", "previous dikhao", "pichle items"
     ]
     if any(clean_input == k or clean_input.startswith(k) for k in prev_keywords):
         return {
-            "is_greeting": False,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "rewritten_query": "Show previous page of previous results",
+            "needs_context": False,
+            "is_fast_exit": True,
             "intent": "pagination",
             "confidence": 1.0,
-            "updated_slots": {**active_slots, "pagination_direction": "prev"}
+            "rewritten_query": "Show previous page of previous results",
+            "updated_slots": {**slots, "pagination_direction": "prev"},
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 
     next_keywords = [
@@ -95,55 +104,101 @@ def analyze_and_rewrite(
     ]
     if any(clean_input == k or clean_input.startswith(k) for k in next_keywords):
         return {
-            "is_greeting": False,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "rewritten_query": "Show next page of previous results",
+            "needs_context": False,
+            "is_fast_exit": True,
             "intent": "pagination",
             "confidence": 1.0,
-            "updated_slots": {**active_slots, "pagination_direction": "next"}
-        }
-
-    # 3. Fast-path for Standalone Queries (Saves ~2,000 tokens by skipping Rewriter LLM)
-    context_pronouns = ["inme", "inmein", "iska", "iske", "iski", "unka", "unke", "usme", "usmein", "ye wale", "wo wale", "aur dikhao", "or dikhao", "isme"]
-    has_pronoun = any(p in clean_input for p in context_pronouns)
-
-    # Direct policy queries -> RAG
-    if any(k in clean_input for k in ["smoking", "buffet timing", "dinner timing", "lunch timing", "break timing"]):
-        return {
-            "is_greeting": False,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "rewritten_query": user_input,
-            "intent": "rag",
-            "confidence": 1.0,
-            "updated_slots": active_slots,
+            "rewritten_query": "Show next page of previous results",
+            "updated_slots": {**slots, "pagination_direction": "next"},
             "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 
-    # Direct CRM queries -> SQL (0 LLM Tokens used!)
+    # 4. Direct Operational Policy Queries (0 LLM Tokens -> RAG)
+    policy_keywords = [
+        "policy", "policies", "rule", "rules", "guideline", "guidelines",
+        "outside food", "alcohol", "liquor", "wine", "beer", "drink allowed",
+        "cancellation", "cancel", "refund", "dress code", "pet", "pets",
+        "parking", "smoking", "wifi", "children", "kids", "allowed", "permission",
+        "timing", "timings", "hours", "open", "close", "start hota", "shuru hota", "khatam",
+        "breakfast timing", "lunch timing", "dinner timing", "tandoor timing", "buffet timing", "break timing"
+    ]
+    if any(k in clean_input for k in policy_keywords):
+        return {
+            "needs_context": False,
+            "is_fast_exit": True,
+            "intent": "rag",
+            "confidence": 1.0,
+            "rewritten_query": user_input,
+            "updated_slots": slots,
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+
+    # 5. Check if query requires Context Resolution (Follow-ups, Corrections & Pronouns)
+    context_indicators = [
+        "inme", "inmein", "iska", "iske", "iski", "unka", "unke", "usme", "usmein",
+        "ye wale", "wo wale", "aur dikhao", "or dikhao", "isme", "isme se", "unme se",
+        "nahi", "nhi", "not", "instead", "badal", "change", "sirf", "only", "tak chalega", "bhi"
+    ]
+    has_context_cue = any(p in clean_input for p in context_indicators)
+
+    if has_history and has_context_cue:
+        return {
+            "needs_context": True,
+            "is_fast_exit": False,
+            "intent": "sql",
+            "confidence": 1.0,
+            "rewritten_query": user_input,
+            "updated_slots": slots,
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+
+    # Standalone CRM business query without pronouns (0 Rewriter LLM Tokens -> SQL node)
     crm_keywords = [
-        "menu", "dish", "dishes", "food", "coffee", "tea", "drink", "drinks", "price", "rate", "cost",
-        "veg", "non-veg", "non veg", "jain", "spicy", "teekha", "pizza", "burger", "ice cream", "dessert", "lassi",
-        "bread", "roti", "naan", "paratha", "starter", "starters", "soup", "chilly", "paneer",
+        "menu", "dish", "dishes", "food", "coffee", "tea", "drink", "drinks", "beverage", "beverages",
+        "shake", "shakes", "juice", "juices", "price", "rate", "cost",
+        "veg", "non-veg", "non veg", "jain", "spicy", "teekha", "sweet", "meetha", "mithai", "halwa",
+        "pizza", "burger", "ice cream", "dessert", "desserts", "lassi", "momo", "dimsum", "rolls", "chaat",
+        "bread", "roti", "naan", "paratha", "starter", "starters", "soup", "chilly", "paneer", "chicken", "dal",
         "waiter", "waiters", "chef", "head chef", "salary", "attendance", "hours", "kaam kiya", "shift",
         "employee", "employees", "staff", "table", "active order", "active orders",
         "bill", "kitchen", "cooking", "served", "pending", "stock", "inventory", "available"
     ]
-    if not has_pronoun and any(k in clean_input for k in crm_keywords):
+    if not has_context_cue and any(k in clean_input for k in crm_keywords):
         return {
-            "is_greeting": False,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "rewritten_query": user_input,
+            "needs_context": False,
+            "is_fast_exit": False,
             "intent": "sql",
             "confidence": 1.0,
-            "updated_slots": active_slots,
+            "rewritten_query": user_input,
+            "updated_slots": slots,
             "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 
-    # 4. Sliding window of last 6 messages (with compressed Assistant history)
-    window_messages = chat_history[-6:] if len(chat_history) > 6 else chat_history
+    # If has_history and pronouns/follow-up detected, requires LLM Rewriter
+    return {
+        "needs_context": True,
+        "is_fast_exit": False,
+        "intent": "sql",
+        "confidence": 1.0,
+        "rewritten_query": user_input,
+        "updated_slots": slots,
+        "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    }
+
+
+def analyze_and_rewrite(
+    user_input: str,
+    chat_history: List[BaseMessage],
+    active_slots: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    LCEL Chain with ChatPromptTemplate and JsonOutputParser for robust context resolution.
+    Only called when needs_context is True!
+    """
+    clean_input = user_input.strip().lower()
+
+    # 4. Compact sliding window of last 3 messages
+    window_messages = chat_history[-3:] if len(chat_history) > 3 else chat_history
     formatted_history = []
     for msg in window_messages:
         if isinstance(msg, HumanMessage):

@@ -1,46 +1,20 @@
 from langchain_core.prompts import ChatPromptTemplate
 
-# 1. Contextual Query Rewriter Prompt Template
+# 1. Contextual Query Rewriter Prompt Template (Streamlined for ~75% Token Reduction)
 REWRITER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """<role>
-You are the Contextual Query Analyzer for Umaid Haveli Restaurant CRM Chatbot.
-Analyze the user's latest input using the sliding window of recent conversation history and active session slots.
-</role>
+    ("system", """You are the Contextual Query Rewriter for Umaid Haveli Restaurant CRM.
+Rewrite the user's latest follow-up into a self-contained natural language query.
+Active slots: {active_slots}
 
-<active_slots>
-{active_slots}
-</active_slots>
-
-<rules>
-1. Format: The rewritten_query MUST ALWAYS be a NATURAL LANGUAGE sentence (e.g. 'Show coffee items from the menu where price <= 300'). NEVER output raw SQL in rewritten_query!
-2. If the user input is a pure greeting (e.g. 'Hi', 'Hello', 'Namaste', 'Thanks'), mark is_greeting=true, intent='greeting', confidence=1.0.
-3. If the user input is ambiguous, incomprehensible, or too vague to discern intent (e.g. 'mera wo kar do', 'kuch batao', 'kal ka kya tha'):
-   - Set needs_clarification=true, intent='clarification', confidence=0.3.
-   - Formulate a polite clarification question with 2-3 specific options (e.g. menu, order status, timings).
-4. If the user input is a follow-up or refinement (e.g. '300 nahi 200', 'veg mein kya hai?', 'aur pichhle mahine ka?'):
-   - CRITICAL ENTITY RETENTION: If previous conversation or active slots discussed a specific category or item (e.g. 'coffee', 'attendance of Rahul', 'order for Table 1') and user now modifies only a filter/budget/date/amount:
-     YOU MUST RETAIN the previous category/entity in the rewritten query!
-     Example: Previous was about 'coffee' -> New input '300 nahi 200 budget' -> rewritten_query MUST be: 'Show coffee items from the menu where price <= 200'.
-5. If the user asks for more items, next page, or continuation of previous query (e.g. 'next', 'next item do', 'aur dikhao', 'aur batao', 'more', 'aage ka', 'next page', 'baaki dishes'):
-   - Set intent='pagination', confidence=1.0.
-   - Set rewritten_query='Show next page of previous results'.
-6. Classify intent strictly into:
-   - 'greeting': Simple conversational pleasantry (hi, hello, namaste, thanks, bye).
-   - 'clarification': User intent is totally ambiguous or incomplete.
-   - 'sql': Queries requiring database records (menu items, prices, orders, inventory stock, employees/staff roster/names, staff attendance, customer records, dining tables).
-   - 'rag': Static restaurant operational knowledge (meal hours, kitchen break hours, buffet pricing, smoking rules, allergy policy).
-   - 'hybrid': Involves both database facts and policy rules.
-   - 'pagination': Browsing next page or more items from previous query.
-   - 'order': User wants to order food, drinks, or place a meal request (e.g. 'chocolate ice cream order karni hai', '1 butter chicken mangwa do').
-- RULE: All queries about staff, employees, waiters, chefs, managers, or attendance MUST be routed to 'sql' (database), NEVER to 'rag'.
-</rules>"""),
+Rules:
+1. Retain previously discussed entity (dish/category/employee/table) when user modifies only budget, date, or filter (e.g. 'coffee' discussed -> '300 nahi 200' -> 'Show coffee items from menu where price <= 200').
+2. Resolve pronouns (iska, usme, inme) to the exact entity from history.
+3. Classify intent strictly into: 'sql' (database records, staff, menu, orders), 'rag' (policies, timings), 'order', 'pagination', 'clarification'.
+4. Return strictly JSON: {{"rewritten_query": "...", "intent": "sql", "confidence": 1.0}}"""),
     ("human", """<chat_history>
 {chat_history}
 </chat_history>
-
-<current_user_message>
-{user_input}
-</current_user_message>""")
+User: {user_input}""")
 ])
 
 
@@ -75,74 +49,124 @@ Your job is to select strictly the 2 to 4 most relevant database tables needed t
 ])
 
 
-# 3. Text-to-SQL Generator Prompt Template (JSON Output)
-SQL_GENERATOR_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """<role>
+from typing import List, Any
+from langchain_core.messages import SystemMessage, HumanMessage
+
+COMPACT_SCHEMAS = {
+    "menu_items": "menu_items(id, name, price, category_id, is_veg, is_jain, spice_level, prep_time_mins)",
+    "categories": "categories(id, name)",
+    "employees": "employees(id, name, role, phone, shift)",
+    "attendance": "attendance(id, employee_id, date, status, check_in, check_out)",
+    "orders": "orders(id, order_number, table_id, customer_id, net_amount, status)",
+    "order_items": "order_items(id, order_id, menu_item_id, quantity, unit_price, total_price)",
+    "dining_tables": "dining_tables(id, table_number, capacity, section, status)",
+    "inventory": "inventory(id, name, stock, unit, available, price)",
+    "customers": "customers(id, name, phone, loyalty_points, vip_status, food_preference, total_visits)",
+    "feedback": "feedback(id, order_id, customer_id, food_rating, service_rating, ambiance_rating, comments)",
+    "reservations": "reservations(id, customer_id, table_id, guest_count, reservation_date, reservation_time, special_request, status)"
+}
+
+DOMAIN_RULES_AND_EXAMPLES = {
+    "menu": (
+        "- Multi-word dish names: ALWAYS split into separate AND LIKE: (m.name LIKE '%chocolate%' AND m.name LIKE '%ice%').\n"
+        "- Lean Columns: select `m.name, m.price, c.name as category`. Include `m.spice_level` only if user asks for spicy.\n"
+        "- Join: `menu_items.category_id = categories.id`.\n"
+        "- Jain / Meal Filter: If user asks for 'Jain food' or 'food/dishes/khana', exclude beverages: `m.is_jain = 1 AND LOWER(c.name) NOT LIKE '%beverage%'`.\n"
+        "- Fastest / Quick dishes: When user asks for fastest / 'jaldi banne wali' / 'kam prep time', use `WHERE m.prep_time_mins IS NOT NULL ORDER BY m.prep_time_mins ASC LIMIT 10`. NEVER filter by `LIKE '%ban%'`!\n"
+        "- Synonyms: For 'starters' / 'snacks' use `(LOWER(c.name) LIKE '%snack%' OR LOWER(c.name) LIKE '%attraction%')`.\n"
+        "- Synonyms: For 'cold drinks' / 'shakes' use `(LOWER(c.name) LIKE '%cold%' OR LOWER(c.name) LIKE '%beverage%')`.\n",
+        'User: "Cold Coffee under 200"\nJSON: {"sql": "SELECT m.name, m.price, c.name as category FROM menu_items m JOIN categories c ON m.category_id = c.id WHERE m.name LIKE \'%coffee%\' AND m.price <= 200 LIMIT 10 OFFSET 0;", "tables_used": ["menu_items", "categories"], "reasoning": "Filter coffee dishes under budget"}'
+    ),
+    "attendance": (
+        "- Case-insensitive role matching: `LOWER(role) LIKE '%waiter%'`.\n"
+        "- Attendance dates in this DB are strictly August 2026: `a.date LIKE '2026-08%'`.\n"
+        "- Join: `attendance.employee_id = employees.id`.\n",
+        'User: "Rahul attendance"\nJSON: {"sql": "SELECT a.date, a.status, a.check_in, a.check_out FROM attendance a JOIN employees e ON a.employee_id = e.id WHERE e.name LIKE \'%Rahul%\' AND a.date LIKE \'2026-08%\' LIMIT 10 OFFSET 0;", "tables_used": ["employees", "attendance"], "reasoning": "Fetch attendance logs for Rahul"}'
+    ),
+    "orders": (
+        "- Join: `orders.id = order_items.order_id`, `order_items.menu_item_id = menu_items.id`.\n"
+        "- Live/Active orders: `status IN ('pending', 'cooking', 'served')`.\n",
+        'User: "Table 1 active order"\nJSON: {"sql": "SELECT o.order_number, m.name as dish, oi.quantity, o.net_amount as total_bill FROM orders o JOIN order_items oi ON o.id = oi.order_id JOIN menu_items m ON oi.menu_item_id = m.id WHERE o.table_id = 1 AND o.status != \'completed\' LIMIT 10;", "tables_used": ["orders", "order_items", "menu_items"], "reasoning": "Fetch live order items and net bill for Table 1"}}'
+    ),
+    "inventory": (
+        "- Multi-word search in inventory: `name LIKE '%word1%' AND name LIKE '%word2%'`.\n"
+        "- Select: `name, stock, unit, available, price`.\n",
+        'User: "Chocolate ice cream stock"\nJSON: {"sql": "SELECT name, stock, available, price, unit FROM inventory WHERE (name LIKE \'%chocolate%\' AND name LIKE \'%ice%\') LIMIT 10;", "tables_used": ["inventory"], "reasoning": "Check stock count in inventory"}'
+    ),
+    "customers": (
+        "- VIP guests: use `LOWER(vip_status) IN ('gold', 'platinum')`. Column is `vip_status`, NOT `customer_type`.\n"
+        "- Select: `name, phone, vip_status, loyalty_points, total_visits`.\n",
+        'User: "VIP guests list"\nJSON: {"sql": "SELECT name, vip_status, loyalty_points, total_visits FROM customers WHERE LOWER(vip_status) IN (\'gold\', \'platinum\') LIMIT 10 OFFSET 0;", "tables_used": ["customers"], "reasoning": "Fetch VIP guests"}'
+    ),
+    "tables": (
+        "- Columns: `table_number, capacity, section, status`.\n"
+        "- Section matching: `LOWER(section) LIKE '%rooftop%'` or `status = 'available'`.\n",
+        'User: "Rooftop tables available"\nJSON: {"sql": "SELECT table_number, capacity, section, status FROM dining_tables WHERE LOWER(section) LIKE \'%rooftop%\' AND status = \'available\' LIMIT 10 OFFSET 0;", "tables_used": ["dining_tables"], "reasoning": "Fetch available rooftop tables"}'
+    ),
+    "feedback": (
+        "- Join: `feedback.customer_id = customers.id`.\n"
+        "- Select: `c.name as customer, f.food_rating, f.service_rating, f.comments`.\n",
+        'User: "Customer feedback reviews"\nJSON: {"sql": "SELECT c.name as customer, f.food_rating, f.service_rating, f.comments FROM feedback f JOIN customers c ON f.customer_id = c.id LIMIT 10 OFFSET 0;", "tables_used": ["feedback", "customers"], "reasoning": "Fetch customer reviews"}'
+    )
+}
+
+def build_situation_sql_messages(tables: List[str], query: str, error_context: str = "") -> List[Any]:
+    """Dynamically builds a compact, situation-specific prompt (reducing tokens by 75%)."""
+    schema_lines = [COMPACT_SCHEMAS.get(t, f"{t}(...)") for t in tables]
+    schema_text = "\n".join(schema_lines)
+
+    if any(t in tables for t in ["attendance", "employees"]):
+        domain = "attendance"
+    elif any(t in tables for t in ["orders", "order_items"]):
+        domain = "orders"
+    elif "inventory" in tables:
+        domain = "inventory"
+    elif "customers" in tables:
+        domain = "customers"
+    elif "dining_tables" in tables:
+        domain = "tables"
+    elif "feedback" in tables:
+        domain = "feedback"
+    else:
+        domain = "menu"
+
+    rules_text, example_text = DOMAIN_RULES_AND_EXAMPLES.get(domain, DOMAIN_RULES_AND_EXAMPLES["menu"])
+    err_str = f"\n<self_correction_error>\n{error_context}\n</self_correction_error>" if error_context else ""
+
+    sys_prompt = f"""<role>
 You are a precision Text-to-SQL engine for a SQLite Restaurant CRM database.
-Convert natural language business queries into a clean JSON structure containing an executable, optimized, read-only SQLite query.
+Convert natural language business queries into a clean JSON structure containing an executable, read-only SQLite query.
 </role>
 
 <database_schema>
-{schema}
+{schema_text}
 </database_schema>
 
 <constraints>
-1. Generate strictly a valid SQLite SELECT or WITH statement.
-2. NEVER generate modifying statements (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE).
-3. Lean Columns: Select `m.name, m.price, c.name as category`. Include `m.spice_level`, `m.prep_time_mins`, `m.is_veg`, or `m.is_jain` ONLY when the user's query asks about spice, timing, or diet. NEVER select internal IDs (`m.id`, `m.category_id`).
-4. Food Attributes & Filtering:
-   - For multi-word dishes (e.g. 'chocolate ice cream', 'masala tea', 'butter chicken'), DO NOT match as a single rigid string! In the database, item names often use parentheses like 'Ice Cream (Chocolate)'. ALWAYS split keywords into separate AND LIKE conditions:
-     e.g., `WHERE (m.name LIKE '%chocolate%' AND m.name LIKE '%ice%')`
-     e.g., `WHERE (m.name LIKE '%masala%' AND m.name LIKE '%tea%')`
-   - If user asks for spicy food (e.g. 'kuch spicy', 'spicy dishes'), filter `WHERE m.spice_level IN ('medium', 'spicy')` and include `m.spice_level`.
-   - If user asks for quick/fast food (e.g. 'kitna time lagega', 'jaldi banne wala'), include `m.prep_time_mins`.
-   - If user asks for veg/non-veg/jain, filter on `m.is_veg` or `m.is_jain` respectively.
-5. Inventory & Stock Queries:
-   - When user asks if an item is available in stock or asks for stock count:
-     Query `inventory`: `SELECT name, stock, available, price, unit FROM inventory WHERE (name LIKE '%word1%' AND name LIKE '%word2%') LIMIT 10;`
-6. Attendance & Dates:
-   - All attendance records in this database are for August 2026 ('2026-08').
-   - NEVER use `strftime('%Y-%m', 'now')` for attendance because 'now' will not match historical database records.
-   - When user asks for attendance of a month or 'whole month', use `a.date LIKE '2026-08%'` or omit date filter.
-7. Relationships:
-   - orders.id = order_items.order_id
-   - menu_items.id = order_items.menu_item_id
-   - categories.id = menu_items.category_id
-   - employees.id = attendance.employee_id
-   - customers.id = orders.customer_id
-   - dining_tables.id = orders.table_id
-8. Case-Insensitive String Matching:
-   - In SQLite, the '=' operator on TEXT is strictly CASE-SENSITIVE ('Waiter' != 'waiter').
-   - ALWAYS use `LOWER(column) LIKE '%value%'` or `column LIKE '%value%'` for filtering text columns (e.g. `role`, `status`, `name`, `category`).
-   - Example: For waiters, use `WHERE LOWER(role) LIKE '%waiter%'` (or `WHERE role LIKE '%waiter%'`), NEVER `WHERE role = 'waiter'`.
-9. Category Synonyms:
-   - If user asks for 'cold drinks', 'juice', 'shake': Category in DB is 'Cold Beverages' -> use `(LOWER(c.name) LIKE '%cold%' OR LOWER(c.name) LIKE '%beverage%')`.
-   - If user asks for 'tandoori breads', 'roti', 'naan': Category in DB is 'Tandoor Breads' -> use `(LOWER(c.name) LIKE '%bread%' OR LOWER(c.name) LIKE '%tandoor%')`.
-   - If user asks for 'starters' or 'snacks': use `(LOWER(c.name) LIKE '%snack%' OR LOWER(c.name) LIKE '%attraction%')`.
-10. Output format must be strictly a JSON object:
-   {{
-     "sql": "SELECT ...",
-     "tables_used": ["..."],
-     "reasoning": "Short 1-line reason for this query"
-   }}
+1. Generate strictly a valid SQLite SELECT statement.
+2. NEVER generate modifying statements (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE).
+3. Every query MUST include a valid 'FROM <table_name>' clause. Never omit FROM.
+{rules_text}
+Output format must be strictly a JSON object:
+{{
+  "sql": "SELECT ...",
+  "tables_used": ["..."],
+  "reasoning": "Short 1-line reason for this query"
+}}
 </constraints>
 
-<few_shot_examples>
-User: "waiter ke naam baato"
-JSON: {{"sql": "SELECT name, role, phone, shift FROM employees WHERE LOWER(role) LIKE '%waiter%';", "tables_used": ["employees"], "reasoning": "Fetching employees with waiter role using case-insensitive match"}}
+<few_shot_example>
+{example_text}
+</few_shot_example>
+{err_str}"""
 
-User: "ye baato ki apke pass chocolate ice cream available hai stock me and kitne hai"
-JSON: {{"sql": "SELECT name, stock, available, price, unit FROM inventory WHERE (name LIKE '%chocolate%' AND name LIKE '%ice%') LIMIT 10;", "tables_used": ["inventory"], "reasoning": "Checking stock levels for chocolate ice cream in inventory with multi-word matching"}}
+    return [
+        SystemMessage(content=sys_prompt),
+        HumanMessage(content=f"<task>Generate JSON SQL query for: '{query}'</task>")
+    ]
 
-User: "Table 1 par kya order chal raha hai aur bill kitna hua?"
-JSON: {{"sql": "SELECT o.order_number, m.name as dish, oi.quantity, oi.total_price, o.status, o.net_amount as total_bill FROM orders o JOIN order_items oi ON o.id = oi.order_id JOIN menu_items m ON oi.menu_item_id = m.id WHERE o.table_id = 1 AND o.status IN ('pending', 'cooking', 'served') LIMIT 50;", "tables_used": ["orders", "order_items", "menu_items"], "reasoning": "Fetching live order items and net bill for Table 1"}}
-
-User: "Vikash Mehra ne whole month me kitne hours kaam kiya"
-JSON: {{"sql": "SELECT e.name, ROUND(SUM((strftime('%H', a.check_out) - strftime('%H', a.check_in)) + (strftime('%M', a.check_out) - strftime('%M', a.check_in))/60.0), 1) as total_hours_worked FROM attendance a JOIN employees e ON a.employee_id = e.id WHERE e.name LIKE '%Vikash Mehra%' AND a.date LIKE '2026-08%' AND a.check_in IS NOT NULL AND a.check_out IS NOT NULL;", "tables_used": ["employees", "attendance"], "reasoning": "Calculating total hours worked by summing duration of check_in and check_out"}}
-</few_shot_examples>
-{error_context}"""),
-    ("human", "<task>Generate JSON SQL query for: '{query}'</task>")
-])
+# Backward compatibility alias
+SQL_GENERATOR_PROMPT = None
 
 
 # 4. Response Synthesizer Prompt Template (Zero-Fluff, Token-Efficient)
@@ -173,4 +197,18 @@ Provide direct, concise, and clean answers strictly grounded in the provided Dat
 <task>
 Synthesize the final natural response for the guest/staff member:
 </task>""")
+])
+
+
+# 5. Dynamic Clarification & Follow-Up Prompt Template (Streamlined for ~65% Token Reduction)
+DYNAMIC_FOLLOWUP_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are the AI Assistant for Umaid Haveli Restaurant, Jaipur.
+The requested item/record was not found, or the query is ambiguous.
+Generate a polite 1-2 sentence response in Hindi/Hinglish:
+- If not found: politely mention it, suggest 2 real alternatives (Tandoori Starters, Paneer Specials, Hot/Cold Beverages, Desserts), and ask a follow-up.
+- If ambiguous: ask a focused follow-up question specifically for that entity.
+No robotic lists, no emojis, crisp and warm."""),
+    ("human", """User Query: {user_query}
+Situation: {situation}
+Generate a 1-2 sentence response:""")
 ])

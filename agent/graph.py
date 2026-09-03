@@ -12,11 +12,11 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Base
 from langchain_core.output_parsers import StrOutputParser
 
 from agent.state import AgentState
-from agent.rewriter import analyze_and_rewrite
+from agent.rewriter import analyze_and_rewrite, fast_filter_classify
 from agent.sql_agent import SQLAgent
 from agent.rag_agent import RAGAgent
 from agent.result_validator import ResultValidator, ResponseFormatter
-from agent.prompts import SYNTHESIZER_PROMPT
+from agent.prompts import SYNTHESIZER_PROMPT, DYNAMIC_FOLLOWUP_PROMPT
 
 load_dotenv()
 api_key = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
@@ -24,11 +24,10 @@ api_key = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
 str_parser = StrOutputParser()
 
 llm = ChatGroq(
-    model="openai/gpt-oss-20b",
+    model="qwen/qwen3.8-27b",
     api_key=api_key,
     temperature=0.2,
-    max_tokens=1536,
-    reasoning_format="hidden",
+    max_tokens=500,
     max_retries=3,
 )
 
@@ -36,8 +35,31 @@ rag_agent = RAGAgent()
 
 # ----------------- NODE IMPLEMENTATIONS ----------------- #
 
+def fast_filter_node(state: AgentState) -> Dict[str, Any]:
+    """Node 0 (Entry Point): Deterministic triage for greetings, pagination, orders, and standalone queries."""
+    user_input = state["user_input"]
+    active_slots = state.get("active_slots", {})
+    has_history = len(state.get("messages", [])) > 0
+
+    analysis = fast_filter_classify(
+        user_input=user_input,
+        active_slots=active_slots,
+        has_history=has_history
+    )
+
+    cur_tokens = state.get("token_usage") or {"prompt": 0, "completion": 0, "total": 0}
+    return {
+        "needs_context": analysis.get("needs_context", False),
+        "intent": analysis.get("intent", "sql"),
+        "confidence": analysis.get("confidence", 1.0),
+        "rewritten_query": analysis.get("rewritten_query", user_input),
+        "active_slots": analysis.get("updated_slots", active_slots),
+        "response": None,
+        "token_usage": cur_tokens
+    }
+
 def rewriter_node(state: AgentState) -> Dict[str, Any]:
-    """Node 1: Sliding Window Contextual Rewriter + NLP Ambiguity Detector."""
+    """Node 1: Sliding Window Contextual Rewriter + NLP Ambiguity Detector (Only for context follow-ups)."""
     user_input = state["user_input"]
     chat_history = state.get("messages", [])
     active_slots = state.get("active_slots", {})
@@ -49,6 +71,13 @@ def rewriter_node(state: AgentState) -> Dict[str, Any]:
     )
 
     rw_tokens = analysis.get("tokens") or {}
+    cur_tokens = state.get("token_usage") or {"prompt": 0, "completion": 0, "total": 0}
+    updated_tokens = {
+        "prompt": cur_tokens.get("prompt", 0) + rw_tokens.get("prompt_tokens", 0),
+        "completion": cur_tokens.get("completion", 0) + rw_tokens.get("completion_tokens", 0),
+        "total": cur_tokens.get("total", 0) + rw_tokens.get("total_tokens", 0)
+    }
+
     return {
         "rewritten_query": analysis.get("rewritten_query", user_input),
         "intent": analysis.get("intent", "sql"),
@@ -56,11 +85,7 @@ def rewriter_node(state: AgentState) -> Dict[str, Any]:
         "clarification_question": analysis.get("clarification_question"),
         "active_slots": analysis.get("updated_slots", active_slots),
         "response": None,
-        "token_usage": {
-            "prompt": rw_tokens.get("prompt_tokens", 0),
-            "completion": rw_tokens.get("completion_tokens", 0),
-            "total": rw_tokens.get("total_tokens", 0)
-        }
+        "token_usage": updated_tokens
     }
 
 def greeting_node(state: AgentState) -> Dict[str, Any]:
@@ -72,18 +97,39 @@ def greeting_node(state: AgentState) -> Dict[str, Any]:
     }
 
 def clarification_node(state: AgentState) -> Dict[str, Any]:
-    """Fallback node when NLP is ambiguous or user intent is not clear."""
+    """Dynamic Clarification Node: Formulates context-aware follow-up question based on user query."""
+    user_input = state["user_input"]
     question = state.get("clarification_question")
+    cur_tokens = state.get("token_usage") or {"prompt": 0, "completion": 0, "total": 0}
+
     if not question:
-        question = (
-            "Maaf kijiye, main aapka sawal poori tarah samajh nahi paaya. Kya aap:\n"
-            "1. Restaurant ka menu ya prices dekhna chahte hain?\n"
-            "2. Table ka active order ya bill check karna chahte hain?\n"
-            "3. Staff attendance ya restaurant timings janna chahte hain?"
-        )
+        try:
+            messages = DYNAMIC_FOLLOWUP_PROMPT.format_messages(
+                user_query=user_input,
+                situation="The user query was ambiguous, incomplete, or had low confidence. Formulate a polite 1-2 sentence clarification question in Hindi/Hinglish."
+            )
+            llm_resp = llm.invoke(messages)
+            clean_q = re.sub(r"<think>.*?(?:</think>|$)", "", llm_resp.content, flags=re.DOTALL).strip()
+            clean_q = re.sub(r"(?i)here's a thinking process:.*$", "", clean_q, flags=re.DOTALL).strip()
+            clean_q = re.sub(r"(?i)thinking process:.*$", "", clean_q, flags=re.DOTALL).strip()
+            question = str_parser.parse(clean_q).strip()
+
+            tok = getattr(llm_resp, "response_metadata", {}).get("token_usage", {})
+            cur_tokens = {
+                "prompt": cur_tokens.get("prompt", 0) + tok.get("prompt_tokens", 0),
+                "completion": cur_tokens.get("completion", 0) + tok.get("completion_tokens", 0),
+                "total": cur_tokens.get("total", 0) + tok.get("total_tokens", 0)
+            }
+        except Exception:
+            question = (
+                "Maaf kijiye, main aapka sawal poori tarah samajh nahi paaya. "
+                "Kya aap menu, table orders, ya staff attendance ke baare mein kuch specific dekhna chahte hain?"
+            )
+
     return {
         "response": question,
-        "messages": state.get("messages", []) + [HumanMessage(content=state["user_input"]), AIMessage(content=question)]
+        "token_usage": cur_tokens,
+        "messages": state.get("messages", []) + [HumanMessage(content=user_input), AIMessage(content=question)]
     }
 
 def order_node(state: AgentState) -> Dict[str, Any]:
@@ -215,10 +261,7 @@ def sql_node(state: AgentState) -> Dict[str, Any]:
             "result_status": "error"
         }
 
-    # Step E: Validate Output
-    res_status, val_msg = ResultValidator.validate(executed_sql, results, error_msg)
-
-    # Clean base SQL for pagination (remove LIMIT / OFFSET)
+    # Step E: Clean base SQL for pagination (remove LIMIT / OFFSET)
     base_sql = re.sub(r"\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?\s*;?$", "", executed_sql, flags=re.IGNORECASE).strip()
     page_size = 10
     has_more = len(results) >= page_size if results else False
@@ -235,15 +278,32 @@ def sql_node(state: AgentState) -> Dict[str, Any]:
         "tables": tables,
         "sql_query": executed_sql,
         "query_result": results,
-        "result_status": res_status,
         "base_sql": base_sql,
         "page": 1,
         "page_size": page_size,
         "has_more": has_more,
         "doc_context": None,
         "token_usage": updated_tokens,
-        "error": val_msg if res_status == "error" else None,
+        "error": error_msg,
         "retry_count": retry_count
+    }
+
+def result_validator_node(state: AgentState) -> Dict[str, Any]:
+    """Node 6b: Dedicated Result Validator inspecting database execution output."""
+    sql_query = state.get("sql_query", "")
+    results = state.get("query_result")
+    error_msg = state.get("error")
+
+    res_status, val_msg = ResultValidator.validate(sql_query, results, error_msg)
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", 2)
+
+    new_retry = retry_count + 1 if res_status == "error" else retry_count
+
+    return {
+        "result_status": res_status,
+        "error": val_msg if res_status == "error" else error_msg,
+        "retry_count": new_retry
     }
 
 def rag_node(state: AgentState) -> Dict[str, Any]:
@@ -321,8 +381,56 @@ def pagination_node(state: AgentState) -> Dict[str, Any]:
         "error": None
     }
 
+def formatter_node(state: AgentState) -> Dict[str, Any]:
+    """Node 9a: Zero-Token Deterministic Markdown Table Formatter (Bypasses Synthesizer LLM)."""
+    query = state.get("rewritten_query", state["user_input"])
+    results = state.get("query_result", [])
+    sql_query = state.get("sql_query")
+
+    if not results:
+        final_text = "Maaf kijiye, koi record nahi mila."
+    else:
+        sanitized_rows = ResponseFormatter.sanitize_for_presentation(query, results[:15])
+        if len(sanitized_rows) == 1 and len(sanitized_rows[0]) <= 2:
+            items = [f"**{k}:** {v}" for k, v in sanitized_rows[0].items()]
+            final_text = "\n".join(items)
+        else:
+            final_text = ResponseFormatter.format_markdown_table(sanitized_rows)
+
+    current_page = state.get("page", 1)
+    if state.get("has_more"):
+        if current_page > 1:
+            final_text += f"\n\n*(Page {current_page} • Agle ke liye 'next' ya pichhle ke liye 'previous' bole)*"
+        else:
+            final_text += f"\n\n*(Page 1 • Aage dekhne ke liye 'next item do' ya 'aur dikhao' bole)*"
+    elif current_page > 1:
+        final_text += f"\n\n*(Yeh aakhiri page hai - Page {current_page} • Pichhle ke liye 'previous' bole)*"
+
+    new_messages = state.get("messages", []) + [
+        HumanMessage(content=state["user_input"]),
+        AIMessage(content=final_text)
+    ]
+
+    audit_data = {
+        "timestamp": time.time(),
+        "user_role": state.get("user_role", "customer"),
+        "raw_input": state["user_input"],
+        "rewritten_query": query,
+        "intent": state.get("intent"),
+        "sql": sql_query,
+        "rows_count": len(results) if results else 0,
+        "status": "success",
+        "formatter": "direct_deterministic_bypass"
+    }
+
+    return {
+        "response": final_text,
+        "messages": new_messages,
+        "audit_log": audit_data
+    }
+
 def synthesizer_node(state: AgentState) -> Dict[str, Any]:
-    """Synthesizes factual, polite response in Hindi/Hinglish grounded in DB rows and docs."""
+    """Node 9b: Synthesizes responses for RAG policies, empty fallbacks, and error messages."""
     query = state.get("rewritten_query", state["user_input"])
     results = state.get("query_result")
     result_status = state.get("result_status")
@@ -338,69 +446,77 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
             "messages": state.get("messages", []) + [HumanMessage(content=state["user_input"]), AIMessage(content=reply)]
         }
 
-    # If no data found
+    # If no data found - Dynamically formulate a helpful follow-up / alternative suggestion
     if result_status == "empty" and not doc_context:
+        cur_tokens = state.get("token_usage") or {"prompt": 0, "completion": 0, "total": 0}
         q_lower = query.lower()
-        if any(w in q_lower for w in ["employee", "waiter", "staff", "chef", "manager", "captain"]):
-            reply = f"Maaf kijiye, '{query}' ke mutabik koi staff record nahi mila."
-        elif any(w in q_lower for w in ["order", "bill", "table", "kitchen"]):
-            reply = f"Maaf kijiye, '{query}' ke mutabik koi order ya table record nahi mila."
+        tables_used = state.get("tables") or []
+        is_staff_query = any(w in q_lower for w in ["staff", "employee", "waiter", "chef", "manager", "attendance", "shift", "salary", "hours", "phone", "suresh", "rahul", "vikash", "dinesh"]) or any(t in tables_used for t in ["employees", "attendance"])
+        is_inventory_query = "inventory" in tables_used or "stock" in q_lower
+
+        if is_staff_query:
+            situation = (
+                f"The database search for staff/employee '{query}' returned 0 matching records. "
+                "Explain politely in Hindi/Hinglish that this specific staff member was not found in our employee roster. "
+                "Ask if they want to check details for another staff member (like Rahul Sharma, Suresh Meena, Vikash Mehra, Mohan Lal, Dinesh Gurjar) or verify spelling. "
+                "CRITICAL: Do NOT suggest food, dishes, or menu items!"
+            )
+        elif is_inventory_query:
+            situation = (
+                f"The inventory search for '{query}' returned 0 matching stock records. "
+                "Explain politely that this raw item is not tracked or currently not available in store inventory."
+            )
         else:
-            reply = f"Maaf kijiye, '{query}' ke mutabik koi record nahi mila. Hamare menu mein Pizza, Sandwiches, Chinese, Paneer aur Beverages available hain. Kya aap inke options dekhna chahenge?"
+            situation = (
+                "The database executed the query successfully, but returned 0 matching records. "
+                "Explain politely that this specific dish was not found, suggest 2 relevant available alternatives from our royal Rajasthani/North Indian & Continental restaurant menu, and ask a dynamic follow-up question."
+            )
+
+        try:
+            messages = DYNAMIC_FOLLOWUP_PROMPT.format_messages(
+                user_query=query,
+                situation=situation
+            )
+            llm_resp = llm.invoke(messages)
+            clean_reply = re.sub(r"<think>.*?(?:</think>|$)", "", llm_resp.content, flags=re.DOTALL).strip()
+            clean_reply = re.sub(r"(?i)here's a thinking process:.*$", "", clean_reply, flags=re.DOTALL).strip()
+            clean_reply = re.sub(r"(?i)thinking process:.*$", "", clean_reply, flags=re.DOTALL).strip()
+            reply = str_parser.parse(clean_reply).strip()
+
+            tok = getattr(llm_resp, "response_metadata", {}).get("token_usage", {})
+            final_tokens = {
+                "prompt": cur_tokens.get("prompt", 0) + tok.get("prompt_tokens", 0),
+                "completion": cur_tokens.get("completion", 0) + tok.get("completion_tokens", 0),
+                "total": cur_tokens.get("total", 0) + tok.get("total_tokens", 0)
+            }
+        except Exception:
+            reply = f"Maaf kijiye, '{query}' ke mutabik koi record nahi mila. Hamare paas North Indian, Tandoori Starters aur Beverages available hain. Kya aap unke options dekhna chahenge?"
+            final_tokens = cur_tokens
+
         return {
             "response": reply,
+            "token_usage": final_tokens,
             "messages": state.get("messages", []) + [HumanMessage(content=state["user_input"]), AIMessage(content=reply)]
         }
 
-    # If pure database results (no RAG docs), format directly to save 2,500 LLM tokens!
-    llm_resp = None
-    if results is not None and not doc_context:
+    # Prepare grounding prompt for LLM (only for RAG / Policy / Hybrid queries)
+    context_data = ""
+    if results is not None:
         sanitized_rows = ResponseFormatter.sanitize_for_presentation(query, results[:15])
-        if len(sanitized_rows) == 1 and len(sanitized_rows[0]) <= 2:
-            items = [f"**{k}:** {v}" for k, v in sanitized_rows[0].items()]
-            final_text = "\n".join(items)
-        else:
-            final_text = ResponseFormatter.format_markdown_table(sanitized_rows)
-        # 0 tokens spent on synthesizer!
-    else:
-        # Prepare grounding prompt for LLM (only for RAG / Policy queries)
-        context_data = ""
-        if results is not None:
-            sanitized_rows = ResponseFormatter.sanitize_for_presentation(query, results[:15])
-            context_data += f"\nDatabase Query Results ({len(results)} rows):\n{json.dumps(sanitized_rows, indent=1)}\n"
-        if doc_context:
-            context_data += f"\nRestaurant Policy & Operational Documents:\n{json.dumps(doc_context, indent=1)}\n"
+        context_data += f"\nDatabase Query Results ({len(results)} rows):\n{json.dumps(sanitized_rows, indent=1)}\n"
+    if doc_context:
+        context_data += f"\nRestaurant Policy & Operational Documents:\n{json.dumps(doc_context, indent=1)}\n"
 
-        messages = SYNTHESIZER_PROMPT.format_messages(
-            query=query,
-            context_data=context_data if context_data else "No specific context available."
-        )
+    messages = SYNTHESIZER_PROMPT.format_messages(
+        query=query,
+        context_data=context_data if context_data else "No specific context available."
+    )
 
-        llm_resp = llm.invoke(messages)
-        clean_content = re.sub(r"<think>.*?(?:</think>|$)", "", llm_resp.content, flags=re.DOTALL).strip()
-        clean_content = re.sub(r"(?i)here's a thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
-        clean_content = re.sub(r"(?i)thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
-        final_text = str_parser.parse(clean_content).strip()
-
-        if llm_resp and hasattr(llm_resp, "response_metadata"):
-            tu = llm_resp.response_metadata.get("token_usage", {})
-            current_tokens["prompt"] += tu.get("prompt_tokens", 0)
-            current_tokens["completion"] += tu.get("completion_tokens", 0)
-            current_tokens["total"] += tu.get("total_tokens", 0)
-
-        # Fallback to direct clean table if synthesizer was empty or hijacked by thinking
-        if not final_text and results:
-            final_text = ResponseFormatter.format_markdown_table(sanitized_rows)
-
-    # Append pagination navigation hint if more records exist
-    current_page = state.get("page", 1)
-    if state.get("has_more"):
-        if current_page > 1:
-            final_text += f"\n\n*(Page {current_page} • Agle ke liye 'next' ya pichhle ke liye 'previous' bole)*"
-        else:
-            final_text += f"\n\n*(Page 1 • Aage dekhne ke liye 'next item do' ya 'aur dikhao' bole)*"
-    elif current_page > 1:
-        final_text += f"\n\n*(Yeh aakhiri page hai - Page {current_page} • Pichhle ke liye 'previous' bole)*"
+    llm_resp = llm.invoke(messages)
+    clean_content = re.sub(r"<think>.*?(?:</think>|$)", "", llm_resp.content, flags=re.DOTALL).strip()
+    clean_content = re.sub(r"(?i)here's a thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
+    clean_content = re.sub(r"(?i)thinking process:.*$", "", clean_content, flags=re.DOTALL).strip()
+    final_text = str_parser.parse(clean_content).strip()
 
     # Update state messages
     new_messages = state.get("messages", []) + [
@@ -441,6 +557,24 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
 
 # ----------------- CONDITIONAL ROUTING ----------------- #
 
+def route_after_fast_filter(state: AgentState) -> str:
+    """Node 0 Routing: Dispatches greetings, pagination, orders, RAG, rewriter, or direct SQL."""
+    intent = state.get("intent", "sql")
+    needs_context = state.get("needs_context", False)
+
+    if intent == "greeting":
+        return "greeting"
+    elif intent == "pagination":
+        return "pagination"
+    elif intent == "order":
+        return "order"
+    elif intent == "rag":
+        return "rag"
+    elif needs_context:
+        return "rewriter"
+    else:
+        return "sql"
+
 def route_after_rewriter(state: AgentState) -> str:
     """Routes based on intent detected by rewriter node."""
     intent = state.get("intent", "sql")
@@ -461,39 +595,63 @@ def route_after_rewriter(state: AgentState) -> str:
     else:
         return "sql"
 
-def route_after_sql(state: AgentState) -> str:
-    """Checks if SQL node needs self-correction retry or moves to synthesizer."""
-    if state.get("result_status") == "error" and state.get("retry_count", 0) < state.get("max_retries", 2):
+def route_after_validation(state: AgentState) -> str:
+    """Routes based on ResultValidator: self-healing retry, 0-token formatter, or synthesizer fallback."""
+    res_status = state.get("result_status")
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", 2)
+
+    if res_status == "error" and retry_count < max_retries:
         return "retry_sql"
-    return "synthesizer"
+    elif res_status == "valid":
+        return "formatter"
+    else:
+        return "synthesizer"
 
 def route_after_pagination(state: AgentState) -> str:
-    """If pagination node produced a direct response (e.g. end of list), exit; otherwise synthesize."""
+    """If pagination node produced a direct response (e.g. end of list), exit; otherwise format with 0 tokens."""
     if state.get("query_result") is None:
         return END
-    return "synthesizer"
+    return "formatter"
 
 # ----------------- GRAPH ASSEMBLY ----------------- #
 
 def create_restaurant_agent_graph():
-    """Builds and compiles the complete LangGraph conversational graph."""
+    """Builds and compiles the complete LangGraph conversational graph with fast-path triaging."""
     workflow = StateGraph(AgentState)
 
     # Add nodes
+    workflow.add_node("fast_filter", fast_filter_node)
     workflow.add_node("rewriter", rewriter_node)
     workflow.add_node("greeting", greeting_node)
     workflow.add_node("clarification", clarification_node)
     workflow.add_node("order", order_node)
     workflow.add_node("pagination", pagination_node)
     workflow.add_node("sql", sql_node)
+    workflow.add_node("result_validator", result_validator_node)
+    workflow.add_node("formatter", formatter_node)
     workflow.add_node("rag", rag_node)
     workflow.add_node("hybrid", hybrid_node)
     workflow.add_node("synthesizer", synthesizer_node)
 
-    # Entry point
-    workflow.set_entry_point("rewriter")
+    # Entry point is now the Deterministic Fast Filter
+    workflow.set_entry_point("fast_filter")
 
-    # Conditional edge from rewriter
+    # Conditional edge from fast_filter
+    workflow.add_conditional_edges(
+        "fast_filter",
+        route_after_fast_filter,
+        {
+            "greeting": "greeting",
+            "pagination": "pagination",
+            "order": "order",
+            "rag": "rag",
+            "rewriter": "rewriter",
+            "sql": "sql"
+        }
+    )
+
+    # Conditional edge from rewriter (for contextual follow-ups)
     workflow.add_conditional_edges(
         "rewriter",
         route_after_rewriter,
@@ -508,32 +666,37 @@ def create_restaurant_agent_graph():
         }
     )
 
-    # Order node exits to END
+    # Direct exits
+    workflow.add_edge("greeting", END)
+    workflow.add_edge("clarification", END)
     workflow.add_edge("order", END)
+    workflow.add_edge("formatter", END)
 
-    # SQL node loop or advance
+    # SQL node passes directly to dedicated result_validator
+    workflow.add_edge("sql", "result_validator")
+
+    # Result validator routes to self-heal (sql), 0-token formatter, or synthesizer
     workflow.add_conditional_edges(
-        "sql",
-        route_after_sql,
+        "result_validator",
+        route_after_validation,
         {
             "retry_sql": "sql",
+            "formatter": "formatter",
             "synthesizer": "synthesizer"
         }
     )
 
-    # Pagination node route
+    # Pagination routes directly to 0-token formatter or END
     workflow.add_conditional_edges(
         "pagination",
         route_after_pagination,
         {
-            "synthesizer": "synthesizer",
+            "formatter": "formatter",
             END: END
         }
     )
 
-    # Direct edges
-    workflow.add_edge("greeting", END)
-    workflow.add_edge("clarification", END)
+    # RAG & Hybrid routes to synthesizer
     workflow.add_edge("rag", "synthesizer")
     workflow.add_edge("hybrid", "synthesizer")
     workflow.add_edge("synthesizer", END)

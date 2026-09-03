@@ -10,23 +10,27 @@ from langchain_groq import ChatGroq
 from langchain_core.output_parsers import JsonOutputParser
 
 from agent.guardrails import SQLGuardrail
-from agent.prompts import SCHEMA_PRUNER_PROMPT, SQL_GENERATOR_PROMPT
+from agent.prompts import SCHEMA_PRUNER_PROMPT, build_situation_sql_messages
 from database.menu_config import RestaurantCRMDatabase
 
 load_dotenv()
 api_key = os.getenv("groq_key") or os.getenv("GROQ_API_KEY")
 
 llm = ChatGroq(
-    model="openai/gpt-oss-20b",
+    model="qwen/qwen3.8-27b",
     api_key=api_key,
     temperature=0.1,
-    max_tokens=1536,
-    reasoning_format="hidden",
+    max_tokens=500,
     max_retries=3,
 )
 
 crm_db = RestaurantCRMDatabase()
 ALL_DB_TABLES = set(crm_db.get_tables())
+try:
+    _emp_rows = crm_db.execute_query("SELECT name FROM employees")
+    DB_EMPLOYEE_NAMES = {w.lower() for r in _emp_rows for w in r["name"].split() if len(w) > 2}
+except Exception:
+    DB_EMPLOYEE_NAMES = set()
 
 # Pydantic Output Schemas
 class TableSelectionOutput(BaseModel):
@@ -52,25 +56,41 @@ class SQLAgent:
         q = query.lower()
         selected = set()
 
-        # 1. Staff & Attendance
-        if any(w in q for w in ["attendance", "hours", "present", "absent", "leave", "half day", "check in", "check out"]):
+        # 1. Staff & Attendance (Dynamic matching against database employee names)
+        words_in_query = set(re.findall(r"\w+", q))
+        has_emp_name = bool(words_in_query.intersection(DB_EMPLOYEE_NAMES))
+        is_attendance = any(w in q for w in ["attendance", "present", "absent", "leave", "half day", "check in", "check out", "hours", "kaam kiya"])
+
+        if is_attendance:
             selected.update(["employees", "attendance"])
-        elif any(w in q for w in ["employee", "staff", "waiter", "chef", "manager", "captain", "worker", "roster", "shift", "salary", "phone", "hire"]):
+        elif has_emp_name or any(w in q for w in ["employee", "staff", "waiter", "chef", "manager", "captain", "worker", "roster", "shift", "salary", "phone", "hire"]):
             selected.update(["employees"])
 
-        # 2. Stock & Inventory
-        elif any(w in q for w in ["stock", "inventory", "available", "bottles", "scoops"]):
-            selected.update(["inventory"])
-
-        # 3. Active Orders & Kitchen status
-        elif any(w in q for w in ["order", "bill", "cooking", "pending", "served", "table 1", "table 2", "table 3", "table 4", "table 5"]):
+        # 2. Orders & Kitchen status
+        elif any(w in q for w in ["order", "bill", "cooking", "pending", "served", "table"]):
             selected.update(["orders", "order_items", "menu_items", "dining_tables"])
 
-        # 4. Customer Feedback
+        # 3. Stock & Raw Material Inventory (only if specifically asking for stock/inventory)
+        elif any(w in q for w in ["stock", "inventory", "raw material", "bottles", "scoops", "reorder", "godown"]):
+            selected.update(["inventory"])
+
+        # 4. Customer Profiles, VIP Tiers, Loyalty Points
+        elif any(w in q for w in ["customer", "customers", "guest", "guests", "vip", "loyalty", "points"]):
+            selected.update(["customers"])
+
+        # 5. Advance Table Reservations
+        elif any(w in q for w in ["reservation", "reservations", "booking", "booked", "advance booking"]):
+            selected.update(["reservations", "customers", "dining_tables"])
+
+        # 6. Table Seating & Sections
+        elif any(w in q for w in ["seating", "capacity", "section", "rooftop", "ac hall", "poolside", "garden"]):
+            selected.update(["dining_tables"])
+
+        # 7. Customer Feedback & Ratings
         elif any(w in q for w in ["rating", "review", "feedback", "comment"]):
             selected.update(["feedback", "customers"])
 
-        # 5. Menu Items & Categories (Default for dishes, prices, drinks, etc.)
+        # 8. Menu Items & Categories (Default for dishes, prices, drinks, jain, veg, spicy, etc.)
         else:
             selected.update(["menu_items", "categories"])
 
@@ -83,22 +103,11 @@ class SQLAgent:
         user_role: str = "customer",
         previous_error: Optional[str] = None
     ) -> str:
-        """Generates SQLite-compliant read-only SQL query via JsonOutputParser."""
-        schema_text = "\n\n".join([f"Table {t}:\n{crm_db.get_table_schema(t)}" for t in tables])
-
-        error_context = ""
-        if previous_error:
-            error_context = (
-                f"\n<self_correction_error>\n"
-                f"Previous query failed with error: '{previous_error}'. "
-                f"Fix syntax and column references using the exact schema.\n"
-                f"</self_correction_error>"
-            )
-
-        messages = SQL_GENERATOR_PROMPT.format_messages(
-            schema=schema_text,
-            error_context=error_context,
-            query=query
+        """Generates SQLite-compliant read-only SQL query via Situation-Based Dynamic Prompting (75% token reduction)."""
+        messages = build_situation_sql_messages(
+            tables=tables,
+            query=query,
+            error_context=previous_error or ""
         )
 
         raw_sql = ""

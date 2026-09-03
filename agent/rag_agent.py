@@ -56,6 +56,18 @@ class RAGAgent:
                 "title": "Smoking, Allergies & Legal Notes",
                 "content": "Smoking is legally prohibited on restaurant premises. Guests are requested to inform the captain in advance if allergic to any food ingredients. All disputes subject to Jaipur jurisdiction.",
                 "keywords": ["smoking", "smoke", "allergy", "allergic", "ingredients", "jaipur", "dispute", "rules"]
+            },
+            {
+                "section": "Outside Food & Alcohol Policy",
+                "title": "Outside Food & Liquor Guidelines",
+                "content": "Outside food and outside alcoholic beverages are strictly not allowed inside Umaid Haveli restaurant premises.",
+                "keywords": ["outside", "outside food", "alcohol", "liquor", "wine", "beer", "drinks", "allowed", "bring"]
+            },
+            {
+                "section": "Table Reservation & Cancellation Policy",
+                "title": "Booking & Cancellation Guidelines",
+                "content": "Table reservations can be booked in advance for Lunch and Dinner. Cancellations or modifications are accepted free of charge up to 2 hours prior to the reserved dining time.",
+                "keywords": ["reservation", "reserve", "booking", "book", "cancel", "cancellation", "table reservation", "refund", "policy"]
             }
         ]
 

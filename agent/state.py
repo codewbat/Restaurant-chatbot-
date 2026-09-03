@@ -13,6 +13,7 @@ class AgentState(TypedDict):
     intent: Optional[Literal["greeting", "clarification", "sql", "rag", "hybrid", "general", "pagination", "order"]]
     confidence: float
     clarification_question: Optional[str]
+    needs_context: Optional[bool]  # True if query required Rewriter LLM, False if standalone fast-path
     
     # SQL Sub-Agent Pipeline
     tables: List[str]

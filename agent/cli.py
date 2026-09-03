@@ -32,7 +32,7 @@ def start_terminal_chat():
     print("• Type 'exit', 'quit', or 'q' to end the session.")
     print("• Session ID:", session_id)
     print("=" * 70)
-    print()
+    last_tokens = {"prompt": 0, "completion": 0, "total": 0}
 
     while True:
         try:
@@ -64,18 +64,19 @@ def start_terminal_chat():
             resp_text = re.sub(r"(?i)thinking process:.*$", "", resp_text, flags=re.DOTALL).strip()
             print(resp_text if resp_text else "Order / query details processed.")
 
-            # Print debug info if SQL or RAG was executed
-            if result.get("rewritten_query") and result.get("rewritten_query") != user_input:
-                print(f"\n[Context Resolved Standalone Query]: {result.get('rewritten_query')}")
-            if result.get("tables"):
-                print(f"[Dynamic Tables Selected]: {result.get('tables')}")
-            if result.get("sql_query"):
-                print(f"[Executed SQL]: {result.get('sql_query')}")
-            if result.get("intent"):
-                print(f"[Intent]: {result.get('intent')} (Confidence: {result.get('confidence', 1.0)})")
+            # Print debug info only if SQL was executed in THIS turn
+            if result.get("intent") in ["sql", "pagination"]:
+                if result.get("tables"):
+                    print(f"[Dynamic Tables Selected]: {result.get('tables')}")
+                if result.get("sql_query"):
+                    print(f"[Executed SQL]: {result.get('sql_query')}")
             if result.get("token_usage"):
                 tu = result.get("token_usage")
-                print(f"[Tokens Used]: Prompt: {tu.get('prompt', 0)} | Completion: {tu.get('completion', 0)} | Total: {tu.get('total', 0)}")
+                delta_p = tu.get("prompt", 0) - last_tokens.get("prompt", 0)
+                delta_c = tu.get("completion", 0) - last_tokens.get("completion", 0)
+                delta_t = tu.get("total", 0) - last_tokens.get("total", 0)
+                last_tokens = dict(tu)
+                print(f"[This Query Tokens]: Prompt: {delta_p} | Completion: {delta_c} | Total: {delta_t}  (Session Total: {tu.get('total', 0)})")
 
         except KeyboardInterrupt:
             print("\n\nSession terminated by user. Goodbye!")
