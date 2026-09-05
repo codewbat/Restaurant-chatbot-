@@ -200,6 +200,30 @@ def init_crm_database():
     );
     """)
 
+    # 13. Chat History table (Persistent across restarts)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS chat_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        phone TEXT,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """)
+
+    # 14. Active Sessions table (State restoration)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS active_sessions (
+        phone TEXT PRIMARY KEY,
+        customer_id INTEGER,
+        table_number TEXT,
+        last_active TEXT NOT NULL,
+        metadata_json TEXT,
+        FOREIGN KEY (customer_id) REFERENCES customers(id)
+    );
+    """)
+
     print("Populating restaurant, categories, menu items, and inventory...")
 
     # Insert restaurant info

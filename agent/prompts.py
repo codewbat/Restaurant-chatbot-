@@ -55,65 +55,39 @@ from langchain_core.messages import SystemMessage, HumanMessage
 COMPACT_SCHEMAS = {
     "menu_items": "menu_items(id, name, price, category_id, is_veg, is_jain, spice_level, prep_time_mins)",
     "categories": "categories(id, name)",
-    "employees": "employees(id, name, role, phone, shift)",
+    "employees": "employees(id, name, role, phone, salary, shift)",
     "attendance": "attendance(id, employee_id, date, status, check_in, check_out)",
     "orders": "orders(id, order_number, table_id, customer_id, net_amount, status)",
     "order_items": "order_items(id, order_id, menu_item_id, quantity, unit_price, total_price)",
     "dining_tables": "dining_tables(id, table_number, capacity, section, status)",
     "inventory": "inventory(id, name, stock, unit, available, price)",
-    "customers": "customers(id, name, phone, loyalty_points, vip_status, food_preference, total_visits)",
-    "feedback": "feedback(id, order_id, customer_id, food_rating, service_rating, ambiance_rating, comments)",
-    "reservations": "reservations(id, customer_id, table_id, guest_count, reservation_date, reservation_time, special_request, status)"
+    "customers": "customers(id, name, phone, loyalty_points, vip_status, total_visits)",
+    "feedback": "feedback(id, order_id, customer_id, food_rating, service_rating, comments)",
+    "reservations": "reservations(id, customer_id, table_id, guest_count, reservation_date, status)",
+    "restaurant": "restaurant(id, name, contact_phone, opening_time, closing_time)"
 }
 
 DOMAIN_RULES_AND_EXAMPLES = {
-    "menu": (
-        "- Multi-word dish names: ALWAYS split into separate AND LIKE: (m.name LIKE '%chocolate%' AND m.name LIKE '%ice%').\n"
-        "- Lean Columns: select `m.name, m.price, c.name as category`. Include `m.spice_level` only if user asks for spicy.\n"
-        "- Join: `menu_items.category_id = categories.id`.\n"
-        "- Jain / Meal Filter: If user asks for 'Jain food' or 'food/dishes/khana', exclude beverages: `m.is_jain = 1 AND LOWER(c.name) NOT LIKE '%beverage%'`.\n"
-        "- Fastest / Quick dishes: When user asks for fastest / 'jaldi banne wali' / 'kam prep time', use `WHERE m.prep_time_mins IS NOT NULL ORDER BY m.prep_time_mins ASC LIMIT 10`. NEVER filter by `LIKE '%ban%'`!\n"
-        "- Synonyms: For 'starters' / 'snacks' use `(LOWER(c.name) LIKE '%snack%' OR LOWER(c.name) LIKE '%attraction%')`.\n"
-        "- Synonyms: For 'cold drinks' / 'shakes' use `(LOWER(c.name) LIKE '%cold%' OR LOWER(c.name) LIKE '%beverage%')`.\n",
-        'User: "Cold Coffee under 200"\nJSON: {"sql": "SELECT m.name, m.price, c.name as category FROM menu_items m JOIN categories c ON m.category_id = c.id WHERE m.name LIKE \'%coffee%\' AND m.price <= 200 LIMIT 10 OFFSET 0;", "tables_used": ["menu_items", "categories"], "reasoning": "Filter coffee dishes under budget"}'
-    ),
-    "attendance": (
-        "- Case-insensitive role matching: `LOWER(role) LIKE '%waiter%'`.\n"
-        "- Attendance dates in this DB are strictly August 2026: `a.date LIKE '2026-08%'`.\n"
-        "- Join: `attendance.employee_id = employees.id`.\n",
-        'User: "Rahul attendance"\nJSON: {"sql": "SELECT a.date, a.status, a.check_in, a.check_out FROM attendance a JOIN employees e ON a.employee_id = e.id WHERE e.name LIKE \'%Rahul%\' AND a.date LIKE \'2026-08%\' LIMIT 10 OFFSET 0;", "tables_used": ["employees", "attendance"], "reasoning": "Fetch attendance logs for Rahul"}'
-    ),
-    "orders": (
-        "- Join: `orders.id = order_items.order_id`, `order_items.menu_item_id = menu_items.id`.\n"
-        "- Live/Active orders: `status IN ('pending', 'cooking', 'served')`.\n",
-        'User: "Table 1 active order"\nJSON: {"sql": "SELECT o.order_number, m.name as dish, oi.quantity, o.net_amount as total_bill FROM orders o JOIN order_items oi ON o.id = oi.order_id JOIN menu_items m ON oi.menu_item_id = m.id WHERE o.table_id = 1 AND o.status != \'completed\' LIMIT 10;", "tables_used": ["orders", "order_items", "menu_items"], "reasoning": "Fetch live order items and net bill for Table 1"}}'
-    ),
-    "inventory": (
-        "- Multi-word search in inventory: `name LIKE '%word1%' AND name LIKE '%word2%'`.\n"
-        "- Select: `name, stock, unit, available, price`.\n",
-        'User: "Chocolate ice cream stock"\nJSON: {"sql": "SELECT name, stock, available, price, unit FROM inventory WHERE (name LIKE \'%chocolate%\' AND name LIKE \'%ice%\') LIMIT 10;", "tables_used": ["inventory"], "reasoning": "Check stock count in inventory"}'
-    ),
-    "customers": (
-        "- VIP guests: use `LOWER(vip_status) IN ('gold', 'platinum')`. Column is `vip_status`, NOT `customer_type`.\n"
-        "- Select: `name, phone, vip_status, loyalty_points, total_visits`.\n",
-        'User: "VIP guests list"\nJSON: {"sql": "SELECT name, vip_status, loyalty_points, total_visits FROM customers WHERE LOWER(vip_status) IN (\'gold\', \'platinum\') LIMIT 10 OFFSET 0;", "tables_used": ["customers"], "reasoning": "Fetch VIP guests"}'
-    ),
-    "tables": (
-        "- Columns: `table_number, capacity, section, status`.\n"
-        "- Section matching: `LOWER(section) LIKE '%rooftop%'` or `status = 'available'`.\n",
-        'User: "Rooftop tables available"\nJSON: {"sql": "SELECT table_number, capacity, section, status FROM dining_tables WHERE LOWER(section) LIKE \'%rooftop%\' AND status = \'available\' LIMIT 10 OFFSET 0;", "tables_used": ["dining_tables"], "reasoning": "Fetch available rooftop tables"}'
-    ),
-    "feedback": (
-        "- Join: `feedback.customer_id = customers.id`.\n"
-        "- Select: `c.name as customer, f.food_rating, f.service_rating, f.comments`.\n",
-        'User: "Customer feedback reviews"\nJSON: {"sql": "SELECT c.name as customer, f.food_rating, f.service_rating, f.comments FROM feedback f JOIN customers c ON f.customer_id = c.id LIMIT 10 OFFSET 0;", "tables_used": ["feedback", "customers"], "reasoning": "Fetch customer reviews"}'
-    )
+    "menu": "- Search: ALWAYS use word matching like `(m.name LIKE '% ' || 'word' || '%' OR m.name LIKE 'word%' OR m.name LIKE '% ' || 'word')` or `(m.name LIKE '% Tea%' OR m.name LIKE 'Tea%')` so 'tea' never matches 'Steam'. Join: menu_items m JOIN categories c ON m.category_id = c.id. Select: m.name, m.price, c.name as category.",
+    "attendance": "- Dates: a.date LIKE '2026-08%'. Staff matching: ALWAYS use e.name LIKE '%name%'. Join: attendance a JOIN employees e ON a.employee_id = e.id. Select: a.date, a.status, a.check_in, a.check_out.",
+
+    "orders": "- Join: orders o JOIN order_items oi ON o.id = oi.order_id JOIN menu_items m ON oi.menu_item_id = m.id. Active: status != 'completed'.",
+    "inventory": "- Select: name, stock, available, price, unit FROM inventory.",
+    "customers": "- VIP: LOWER(vip_status) IN ('gold', 'platinum'). Select: name, phone, vip_status, loyalty_points.",
+    "tables": "- Columns: table_number, capacity, section, status FROM dining_tables.",
+    "feedback": "- Join: feedback f JOIN customers c ON f.customer_id = c.id."
 }
 
-def build_situation_sql_messages(tables: List[str], query: str, error_context: str = "") -> List[Any]:
-    """Dynamically builds a compact, situation-specific prompt (reducing tokens by 75%)."""
+
+def build_situation_sql_messages(
+    tables: List[str],
+    query: str,
+    error_context: str = "",
+    entity_hints: str = ""
+) -> List[Any]:
+    """Ultra-lean micro-prompt for SQL generation (under 120 prompt tokens)."""
     schema_lines = [COMPACT_SCHEMAS.get(t, f"{t}(...)") for t in tables]
-    schema_text = "\n".join(schema_lines)
+    schema_text = "; ".join(schema_lines)
 
     if any(t in tables for t in ["attendance", "employees"]):
         domain = "attendance"
@@ -130,40 +104,21 @@ def build_situation_sql_messages(tables: List[str], query: str, error_context: s
     else:
         domain = "menu"
 
-    rules_text, example_text = DOMAIN_RULES_AND_EXAMPLES.get(domain, DOMAIN_RULES_AND_EXAMPLES["menu"])
-    err_str = f"\n<self_correction_error>\n{error_context}\n</self_correction_error>" if error_context else ""
+    rule = DOMAIN_RULES_AND_EXAMPLES.get(domain, DOMAIN_RULES_AND_EXAMPLES["menu"])
+    err_str = f" Error: {error_context}" if error_context else ""
+    hint_str = f" DB Hints: {entity_hints}" if entity_hints else ""
 
-    sys_prompt = f"""<role>
-You are a precision Text-to-SQL engine for a SQLite Restaurant CRM database.
-Convert natural language business queries into a clean JSON structure containing an executable, read-only SQLite query.
-</role>
-
-<database_schema>
-{schema_text}
-</database_schema>
-
-<constraints>
-1. Generate strictly a valid SQLite SELECT statement.
-2. NEVER generate modifying statements (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE).
-3. Every query MUST include a valid 'FROM <table_name>' clause. Never omit FROM.
-{rules_text}
-Output format must be strictly a JSON object:
-{{
-  "sql": "SELECT ...",
-  "tables_used": ["..."],
-  "reasoning": "Short 1-line reason for this query"
-}}
-</constraints>
-
-<few_shot_example>
-{example_text}
-</few_shot_example>
-{err_str}"""
+    sys_prompt = f"""Generate SQLite SELECT query. Output strictly JSON: {{"sql": "SELECT ..."}}
+Schema: {schema_text}
+Rule: {rule}{hint_str}{err_str}"""
 
     return [
         SystemMessage(content=sys_prompt),
-        HumanMessage(content=f"<task>Generate JSON SQL query for: '{query}'</task>")
+        HumanMessage(content=f"Query: {query}")
     ]
+
+
+
 
 # Backward compatibility alias
 SQL_GENERATOR_PROMPT = None

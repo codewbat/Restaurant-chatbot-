@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Umaid Haveli • Restaurant CRM & AI Command Center</title>
+    <meta name="description" content="Real-time Restaurant CRM Dashboard and AI Agent Command Center with Two-Way Live Database Synchronization.">
+    <!-- Google Fonts: Outfit & Plus Jakarta Sans -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation Bar -->
+        <header class="top-nav">
+            <div class="nav-brand">
+                <div class="brand-logo">🏰</div>
+                <div class="brand-info">
+                    <h1>UMAID HAVELI</h1>
+                    <span class="brand-subtitle">Restaurant CRM & AI Agent Command Center</span>
+                </div>
+            </div>
+
+            <div class="nav-actions">
+                <div class="sync-badge" id="syncStatusBadge">
+                    <span class="pulse-dot"></span>
+                    <span class="sync-text">2-Way DB Sync: Live</span>
+                </div>
+                <div class="timestamp-box" id="liveClock">--:--:--</div>
+                <button class="btn btn-secondary" id="btnRefresh" title="Manual Refresh">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                    Refresh
+                </button>
+            </div>
+        </header>
+
+        <!-- KPI Metrics Ribbon -->
+        <section class="kpi-grid">
+            <div class="kpi-card" id="kpiOrdersCard">
+                <div class="kpi-icon gold">🍳</div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Active Kitchen Orders</span>
+                    <h3 class="kpi-value" id="kpiActiveOrders">--</h3>
+                    <span class="kpi-hint">Live cooking / preparing</span>
+                </div>
+            </div>
+
+            <div class="kpi-card" id="kpiTablesCard">
+                <div class="kpi-icon emerald">🪑</div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Table Availability</span>
+                    <h3 class="kpi-value" id="kpiTableAvailability">-- / --</h3>
+                    <span class="kpi-hint" id="kpiOccupancyRate">0% Occupied</span>
+                </div>
+            </div>
+
+            <div class="kpi-card" id="kpiRevenueCard">
+                <div class="kpi-icon ruby">💰</div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Today's Revenue</span>
+                    <h3 class="kpi-value" id="kpiRevenue">₹0</h3>
+                    <span class="kpi-hint">Processed orders</span>
+                </div>
+            </div>
+
+            <div class="kpi-card" id="kpiStockCard">
+                <div class="kpi-icon amber">⚠️</div>
+                <div class="kpi-content">
+                    <span class="kpi-label">Low Stock Alerts</span>
+                    <h3 class="kpi-value" id="kpiLowStock">--</h3>
+                    <span class="kpi-hint">Needs kitchen reorder</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Dashboard Navigation Tabs -->
+        <nav class="dashboard-tabs">
+            <button class="tab-btn active" data-tab="ordersTab" id="tabBtnOrders">
+                <span class="tab-icon">📋</span> Live Kitchen Orders <span class="tab-count" id="badgeOrderCount">0</span>
+            </button>
+            <button class="tab-btn" data-tab="tablesTab" id="tabBtnTables">
+                <span class="tab-icon">🪑</span> Floor Plan & Tables
+            </button>
+            <button class="tab-btn" data-tab="inventoryTab" id="tabBtnInventory">
+                <span class="tab-icon">📦</span> Menu & Stock Manager
+            </button>
+            <button class="tab-btn" data-tab="chatTab" id="tabBtnChat">
+                <span class="tab-icon">🤖</span> AI Agent Console
+            </button>
+        </nav>
+
+        <!-- Tab Contents Area -->
+        <main class="dashboard-content">
+            <!-- TAB 1: KITCHEN ORDERS -->
+            <section class="tab-panel active" id="ordersTab">
+                <div class="panel-header">
+                    <div class="panel-title-box">
+                        <h2>Live Kitchen Orders & Floor Service</h2>
+                        <p>Real-time order monitoring with 2-way sync between AI Agent and Kitchen Staff</p>
+                    </div>
+                    <div class="filter-group">
+                        <button class="filter-btn active" data-status="all">All Orders</button>
+                        <button class="filter-btn" data-status="cooking">Cooking</button>
+                        <button class="filter-btn" data-status="in_kitchen">In Kitchen</button>
+                        <button class="filter-btn" data-status="served">Served</button>
+                        <button class="filter-btn" data-status="completed">Completed</button>
+                    </div>
+                </div>
+
+                <div class="orders-grid" id="ordersGrid">
+                    <div class="loading-spinner">Loading kitchen orders...</div>
+                </div>
+            </section>
+
+            <!-- TAB 2: FLOOR PLAN & TABLES -->
+            <section class="tab-panel" id="tablesTab">
+                <div class="panel-header">
+                    <div class="panel-title-box">
+                        <h2>Restaurant Floor Plan & Seating Status</h2>
+                        <p>Live table occupancy. Click status buttons to assign, seat, or release tables instantly.</p>
+                    </div>
+                    <div class="filter-group">
+                        <button class="filter-btn active" data-section="all">All Sections</button>
+                        <button class="filter-btn" data-section="AC Hall">AC Hall</button>
+                        <button class="filter-btn" data-section="Rooftop">Rooftop</button>
+                        <button class="filter-btn" data-section="Garden">Garden</button>
+                        <button class="filter-btn" data-section="Private Dining">Private Dining</button>
+                        <button class="filter-btn" data-section="Poolside">Poolside</button>
+                    </div>
+                </div>
+
+                <div class="tables-grid" id="tablesGrid">
+                    <div class="loading-spinner">Loading restaurant floor tables...</div>
+                </div>
+            </section>
+
+            <!-- TAB 3: INVENTORY & STOCK -->
+            <section class="tab-panel" id="inventoryTab">
+                <div class="panel-header">
+                    <div class="panel-title-box">
+                        <h2>Live Menu & Inventory Stock Management</h2>
+                        <p>Adjust stock levels or toggle availability. The AI Agent will immediately react to out-of-stock items.</p>
+                    </div>
+                    <div class="search-box">
+                        <input type="text" id="inventorySearch" placeholder="Search dish or item name (e.g. Tea, Paneer, Coffee)...">
+                    </div>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="data-table" id="inventoryTable">
+                        <thead>
+                            <tr>
+                                <th>Item Name</th>
+                                <th>Category</th>
+                                <th>Unit Price</th>
+                                <th>Current Stock</th>
+                                <th>Reorder Level</th>
+                                <th>Availability Status</th>
+                                <th>Quick Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="inventoryTableBody">
+                            <tr><td colspan="7" class="text-center">Loading inventory...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 4: AI AGENT CONSOLE -->
+            <section class="tab-panel" id="chatTab">
+                <div class="chat-layout">
+                    <!-- Left: Interactive Chat Window -->
+                    <div class="chat-container">
+                        <div class="chat-header">
+                            <div class="agent-avatar">🤖</div>
+                            <div class="agent-meta">
+                                <h3>Umaid Haveli AI Assistant</h3>
+                                <span class="agent-status-badge">Online • OOP Agent Engine</span>
+                            </div>
+                            <!-- Phone Login & Customer Profile Switcher -->
+                            <div class="customer-auth-bar">
+                                <span class="auth-label">📱 Customer:</span>
+                                <input type="text" id="customerPhoneInput" value="9660888489" placeholder="Mobile Number" class="auth-phone-input">
+                                <button class="btn btn-secondary btn-sm" id="btnCustomerLogin" title="Login with Phone to restore history">Login / Switch</button>
+                                <span class="customer-profile-badge" id="customerProfileBadge">👤 Amit Sharma (⭐ Gold)</span>
+                            </div>
+                        </div>
+
+                        <div class="chat-messages" id="chatMessages">
+                            <div class="message-bubble assistant">
+                                <div class="msg-avatar">🤖</div>
+                                <div class="msg-content">
+                                    <p><strong>Namaste!</strong> Umaid Haveli AI CRM Assistant mein aapka swagat hai.</p>
+                                    <p>Main menu queries, table bookings, multi-round food orders, live kitchen status aur restaurant policies ke sawal answer karta hoon. Phone number se login karke aap apni pichli chat aur running table orders bhi dekh sakte hain!</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Quick Action Prompt Chips -->
+                        <div class="quick-chips">
+                            <button class="chip" data-prompt="menu dikhao">📜 Menu Dikhao</button>
+                            <button class="chip" data-prompt="merko konsi table assign hai">🪑 Meri Table Konsi Hai?</button>
+                            <button class="chip" data-prompt="T-08 book kardo 5 person ke liye">🪑 Book Table T-08</button>
+                            <button class="chip" data-prompt="Abhi kitne active orders hain?">🍳 Active Orders</button>
+                            <button class="chip" data-prompt="green tea 5 cup order karna hai">🍵 Order 5 Green Tea</button>
+                            <button class="chip" data-prompt="mera bill bana do">🧾 Bill Bana Do</button>
+                        </div>
+
+                        <div class="chat-input-row">
+                            <input type="text" id="chatInput" placeholder="Aapka sawal ya order likhiye (e.g. 'Table T-05 par 2 Cold Coffee order kardo')...">
+                            <button class="btn btn-primary" id="btnSendMessage">
+                                <span>Send</span>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Right: Live AI Telemetry & SQL Inspector -->
+                    <div class="telemetry-panel">
+                        <div class="telemetry-header">
+                            <h3>⚡ Real-Time Telemetry & SQL Inspector</h3>
+                        </div>
+                        <div class="telemetry-body">
+                            <div class="telemetry-item">
+                                <span class="tel-label">Detected Intent:</span>
+                                <span class="tel-badge" id="telIntent">None</span>
+                            </div>
+
+                            <div class="telemetry-item">
+                                <span class="tel-label">Token Utilization:</span>
+                                <div class="token-meter">
+                                    <div class="token-pill">Prompt: <strong id="telPromptTok">0</strong></div>
+                                    <div class="token-pill">Comp: <strong id="telCompTok">0</strong></div>
+                                    <div class="token-pill highlight">Total: <strong id="telTotalTok">0</strong></div>
+                                </div>
+                            </div>
+
+                            <div class="telemetry-item">
+                                <span class="tel-label">Active State Slots:</span>
+                                <pre class="json-viewer" id="telActiveSlots">{}</pre>
+                            </div>
+
+                            <div class="telemetry-item">
+                                <span class="tel-label">Executed Dynamic SQL:</span>
+                                <pre class="sql-viewer" id="telExecutedSql">No SQL executed yet.</pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Table Bill & Settlement Modal -->
+    <div id="billModal" class="modal-overlay">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title-box">
+                    <span class="modal-badge">🧾 CONSOLIDATED INVOICE</span>
+                    <h3 id="billModalTableTitle">Table T-?? Bill</h3>
+                </div>
+                <button class="modal-close-btn" id="btnBillModalClose">&times;</button>
+            </div>
+            <div class="modal-body" id="billModalBody">
+                <div class="loading-spinner">Loading consolidated table bill...</div>
+            </div>
+            <div class="modal-footer" id="billModalFooter">
+                <button class="btn btn-secondary" id="btnBillModalDismiss">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Toast Container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

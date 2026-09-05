@@ -109,6 +109,48 @@ class ResponseFormatter:
 
         return sanitized_rows
 
+    @classmethod
+    def format_direct_lookup(cls, query: str, rows: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Formats single-item or single-entity lookups into a conversational, grounded response (0 LLM tokens).
+        """
+        if not rows or len(rows) != 1:
+            return None
+
+        row = rows[0]
+        q_lower = query.lower()
+
+        # 1. Single Dish lookup
+        if "name" in row and "price" in row:
+            name = row.get("name")
+            price = row.get("price")
+            price_str = f"₹{int(price) if isinstance(price, (int, float)) and price == int(price) else price}"
+            category = row.get("category", row.get("category_id", ""))
+            cat_str = f" ({category})" if category and not str(category).isdigit() else ""
+            spice = f", Spice: {row.get('spice_level')}" if "spice_level" in row and row.get("spice_level") else ""
+            prep = f", Prep Time: {row.get('prep_time_mins')} mins" if "prep_time_mins" in row and row.get("prep_time_mins") else ""
+            return f"🍽️ **{name}**{cat_str} hamare menu mein available hai.\n- **Price:** {price_str}{spice}{prep}"
+
+        # 2. Single Table lookup
+        if "table_number" in row:
+            tbl = row.get("table_number")
+            section = row.get("section", "Main")
+            capacity = row.get("capacity", "")
+            status = row.get("status", "available")
+            cap_str = f" ({capacity} Seater)" if capacity else ""
+            return f"🪑 **Table {tbl}** [{section}{cap_str}]: Abhi **{status.upper()}** hai."
+
+        # 3. Aggregation/Count single result (e.g. active orders count, total bill)
+        for k, v in row.items():
+            k_lower = k.lower()
+            if "count" in k_lower or "active" in k_lower:
+                return f"📊 Filhal total **{v}** active/matching records hain."
+            if "total" in k_lower or "sum" in k_lower or "bill" in k_lower:
+                val_str = f"₹{int(v) if isinstance(v, (int, float)) and v == int(v) else v}" if isinstance(v, (int, float)) else str(v)
+                return f"💰 Total amount: **{val_str}**"
+
+        return None
+
     @staticmethod
     def format_markdown_table(rows: List[Dict[str, Any]]) -> str:
         """Generates a clean markdown table directly from sanitized records."""
@@ -122,3 +164,4 @@ class ResponseFormatter:
         for r in rows:
             lines.append("| " + " | ".join(str(r.get(h, "")) for h in headers) + " |")
         return "\n".join(lines)
+
